@@ -1,0 +1,28 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: wireguard-proxy:latest
+    restart: unless-stopped
+    ports:
+      # WireGuard home server connects here
+      - "${SERVER_PORT:-51820}:51820/udp"
+      # WireGuard clients connect here
+      - "${CLIENT_PORT:-51821}:51821/udp"
+    command:
+      - "--server-port"
+      - "51820"
+      - "--client-port"
+      - "51821"
+      - "--session-timeout"
+      - "${SESSION_TIMEOUT:-300}"
+      - "--log-level"
+      - "${LOG_LEVEL:-INFO}"
+    # Forward only—proxy does not need elevated privileges
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
