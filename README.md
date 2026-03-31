@@ -24,10 +24,31 @@ For each distinct WireGuard client a dedicated ephemeral *relay socket* is
 opened so the home WireGuard instance can track each client as a separate peer.
 
 ```
-WireGuard client A ─────────────────────────────────────────────┐
-WireGuard client B ──→  proxy:client_port ──→ relay socket A  ──┼──→ home WG server
-                                           ──→ relay socket B ──┘   (behind CGNAT)
+WireGuard client A ──┐
+                     ├──→  proxy:client_port ──→ relay socket A ──→ home WG server
+WireGuard client B ──┘                      ──→ relay socket B ──┘  (behind CGNAT)
+
+home WG server ──→ proxy:server_port   (registers home server's current public address)
 ```
+
+## How address registration works
+
+The proxy does not participate in WireGuard at all — it is a dumb UDP relay.
+When the home server sends WireGuard handshake initiation packets toward
+`proxy:server_port`, the proxy records their UDP source address as the current
+home server endpoint.  No completed WireGuard session is needed; the handshake
+retries WireGuard performs naturally are sufficient to keep the CGNAT mapping
+alive and the address up to date.
+
+There is no separate keepalive agent or out-of-band registration mechanism.
+
+## Home server requirements
+
+The home WireGuard server must be a standard Linux `wg`/`wg-quick` instance
+(not a Unifi UDM/UDM-Pro — their firmware does not expose outbound `Endpoint`
+configuration in the GUI).  A small Linux machine (Raspberry Pi, mini-PC, old
+laptop) works well, and it can be placed in a dedicated DMZ on the home router
+for additional isolation.
 
 ## Installation
 
@@ -50,6 +71,13 @@ wireguard-proxy \
   --session-timeout 300
 ```
 
+Or with Docker:
+
+```bash
+cp .env.example .env   # adjust ports if needed
+docker compose up -d
+```
+
 Run as a systemd service on the cloud VM:
 
 ```ini
@@ -67,19 +95,29 @@ WantedBy=multi-user.target
 
 ### Home WireGuard server (`wg0.conf`)
 
-Add a peer section that points at the proxy's **server port**:
+The home server needs one peer entry that points at the proxy's **server port**.
+This causes WireGuard to proactively send handshake initiations outbound through
+CGNAT, registering the home server's public address with the proxy.
 
 ```ini
+[Interface]
+ListenPort = 51820
+PrivateKey = <home-server-private-key>
+
 [Peer]
-# Cloud proxy
-PublicKey = <cloud-proxy-pubkey>
+# Proxy registration peer — the proxy does not complete the handshake;
+# WireGuard's retry traffic is what keeps the CGNAT mapping alive.
+PublicKey = <any-valid-wg-public-key>
 Endpoint = <cloud-ip>:51820
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = 192.0.2.0/32   # unreachable test range — no real traffic
 PersistentKeepalive = 25
+
+# Add one [Peer] block per WireGuard client below
 ```
 
-`PersistentKeepalive = 25` is essential – it keeps the CGNAT mapping alive and
-registers the home server's current public address with the proxy.
+> **Note:** because the proxy does not complete WireGuard handshakes, the peer
+> public key and `AllowedIPs` in the registration peer block do not matter
+> practically — you can generate a fresh throwaway key pair.
 
 ### WireGuard clients
 
