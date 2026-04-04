@@ -3,6 +3,7 @@ name = "wireguard-proxy"
 version = "0.1.0"
 description = "UDP proxy server for WireGuard connections through CGNAT"
 readme = "README.md"
+authors = ["Jasper Büsch"]
 license = "MIT"
 packages = [{ include = "wireguard_proxy", from = "src" }]
 
