@@ -11,8 +11,6 @@ build/
 .venv/
 venv/
 
-# Poetry
-poetry.lock
 
 # Testing
 .pytest_cache/
