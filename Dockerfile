@@ -12,7 +12,8 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root
 
 COPY src/ src/
-RUN poetry install --only main
+RUN poetry build --format wheel && \
+    .venv/bin/pip install --no-deps dist/*.whl
 
 
 # --- runtime stage ---
@@ -25,9 +26,6 @@ WORKDIR /app
 
 # Bring in only the virtual-env from the builder (no Poetry, no build tools)
 COPY --from=builder /app/.venv /app/.venv
-
-# Copy the installed package
-COPY --from=builder /app/src /app/src
 
 ENV PATH="/app/.venv/bin:$PATH"
 
