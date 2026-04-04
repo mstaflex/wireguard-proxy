@@ -19,7 +19,7 @@ RUN poetry install --only main
 FROM python:3.12-slim AS runtime
 
 # Non-root user for least-privilege operation
-RUN useradd --create-home --shell /bin/bash proxy
+RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
 
@@ -34,7 +34,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # UDP ports (both must be published with -p host:container/udp)
 EXPOSE 51820/udp 51821/udp
 
-USER proxy
+USER appuser
 
 ENTRYPOINT ["wireguard-proxy"]
 CMD ["--server-port", "51820", "--client-port", "51821", "--log-level", "INFO"]
