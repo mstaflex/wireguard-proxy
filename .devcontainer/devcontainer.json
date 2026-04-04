@@ -25,5 +25,8 @@
       }
     }
   },
-  "remoteUser": "root"
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/root/.claude,type=bind,consistency=cached"
+  ]
 }

@@ -8,7 +8,7 @@ ENV POETRY_VIRTUALENVS_IN_PROJECT=true \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root
 
 COPY src/ src/
@@ -36,5 +36,5 @@ EXPOSE 51820/udp 51821/udp
 
 USER appuser
 
-ENTRYPOINT ["wireguard-proxy"]
+ENTRYPOINT ["/app/.venv/bin/wireguard-proxy"]
 CMD ["--server-port", "51820", "--client-port", "51821", "--log-level", "INFO"]
