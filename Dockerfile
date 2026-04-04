@@ -8,7 +8,7 @@ ENV POETRY_VIRTUALENVS_IN_PROJECT=true \
 
 WORKDIR /app
 
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml poetry.lock README.md ./
 RUN poetry install --only main --no-root
 
 COPY src/ src/
