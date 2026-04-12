@@ -110,65 +110,84 @@ class TestServerRegistration:
 
 
 class TestClientPacketHandling:
-    async def test_drops_packet_when_no_server_registered(
+    def test_drops_packet_when_no_server_registered(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         import logging
 
         with caplog.at_level(logging.WARNING):
-            await proxy._on_client_packet(DATA, CLIENT_A)
+            proxy._on_client_packet(DATA, CLIENT_A)
 
         assert CLIENT_A not in proxy._sessions
         assert "no server registered" in caplog.text.lower()
 
-    async def test_creates_session_for_new_client(self) -> None:
+    def test_creates_session_for_new_client(self) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         proxy._server_addr = SERVER_ADDR
         proxy._server_transport = make_transport()
 
-        await proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_A)
 
         assert CLIENT_A in proxy._sessions
 
-    async def test_forwards_packet_to_server_via_server_transport(self) -> None:
+    def test_forwards_packet_to_server_via_server_transport(self) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         proxy._server_addr = SERVER_ADDR
         server_transport = make_transport()
         proxy._server_transport = server_transport
 
-        await proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_A)
 
         server_transport.sendto.assert_called_once_with(DATA, SERVER_ADDR)
 
-    async def test_reuses_existing_session(self) -> None:
+    def test_reuses_existing_session(self) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         proxy._server_addr = SERVER_ADDR
         server_transport = make_transport()
         proxy._server_transport = server_transport
 
-        await proxy._on_client_packet(DATA, CLIENT_A)
-        await proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_A)
 
         assert len(proxy._sessions) == 1
         assert server_transport.sendto.call_count == 2
 
-    async def test_independent_sessions_for_different_clients(self) -> None:
+    def test_independent_sessions_for_different_clients(self) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         proxy._server_addr = SERVER_ADDR
         proxy._server_transport = make_transport()
 
-        await proxy._on_client_packet(DATA, CLIENT_A)
-        await proxy._on_client_packet(DATA, CLIENT_B)
+        proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_B)
 
         assert CLIENT_A in proxy._sessions
         assert CLIENT_B in proxy._sessions
 
-    async def test_noop_when_server_transport_not_ready(self) -> None:
+    def test_roaming_replaces_stale_session(self) -> None:
+        """When the same client IP reappears on a new source port (NAT roam),
+        the old session must be evicted so broadcast traffic is not duplicated."""
+        proxy = UDPProxy(server_port=51820, client_port=51821)
+        proxy._server_addr = SERVER_ADDR
+        proxy._server_transport = make_transport()
+
+        old_addr = ("10.0.0.1", 11111)
+        new_addr = ("10.0.0.1", 22222)
+
+        proxy._on_client_packet(DATA, old_addr)
+        assert old_addr in proxy._sessions
+
+        proxy._on_client_packet(DATA, new_addr)
+
+        assert new_addr in proxy._sessions
+        assert old_addr not in proxy._sessions
+        assert len(proxy._sessions) == 1
+
+    def test_noop_when_server_transport_not_ready(self) -> None:
         proxy = UDPProxy(server_port=51820, client_port=51821)
         proxy._server_addr = SERVER_ADDR
         # _server_transport is None — must not raise.
-        await proxy._on_client_packet(DATA, CLIENT_A)
+        proxy._on_client_packet(DATA, CLIENT_A)
 
 
 # ---------------------------------------------------------------------------

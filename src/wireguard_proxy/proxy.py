@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -41,6 +42,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _CLEANUP_INTERVAL = 60  # seconds between session-expiry sweeps
+
+# Socket buffer size for both send and receive queues.  Sized to handle
+# several hundred maximum-size WireGuard datagrams without dropping.
+_SOCKET_BUFFER_SIZE = 4 * 1024 * 1024  # 4 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +99,7 @@ class _ClientSideProtocol(asyncio.DatagramProtocol):
         self._proxy._client_transport = transport
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
-        asyncio.get_running_loop().create_task(self._proxy._on_client_packet(data, addr))
+        self._proxy._on_client_packet(data, addr)
 
     def error_received(self, exc: Exception) -> None:
         logger.error("Client-side socket error: %s", exc)
@@ -142,13 +147,20 @@ class UDPProxy:
                 logger.debug("Forwarding server packet to client %s", client_addr)
                 self._client_transport.sendto(data, client_addr)
 
-    async def _on_client_packet(self, data: bytes, addr: tuple[str, int]) -> None:
+    def _on_client_packet(self, data: bytes, addr: tuple[str, int]) -> None:
         """Handle a packet arriving from a WireGuard client."""
         if self._server_addr is None:
             logger.warning("Dropping packet from %s – no server registered yet", addr)
             return
 
         if addr not in self._sessions:
+            # WireGuard roams: same IP may reappear on a new source port after a
+            # NAT rebinding.  Drop the old stale entry so the broadcast set stays
+            # lean and the client only receives traffic on its current port.
+            stale = [a for a in self._sessions if a[0] == addr[0] and a != addr]
+            for old_addr in stale:
+                logger.info("Client %s roamed to %s – removing stale session", old_addr, addr)
+                self._sessions.pop(old_addr)
             self._sessions[addr] = ClientSession(addr=addr)
             logger.info("New client session: %s", addr)
 
@@ -178,6 +190,36 @@ class UDPProxy:
             await asyncio.sleep(_CLEANUP_INTERVAL)
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_socket(host: str, port: int) -> socket.socket:
+        """Create a UDP socket with generous buffers and no PMTU discovery.
+
+        Disabling PMTU discovery (IP_PMTUDISC_DONT on Linux) prevents the
+        kernel from setting the DF bit on outgoing datagrams.  Without this,
+        large WireGuard data packets (≈1368 B) are silently dropped when the
+        path MTU to the next hop is lower than the datagram size — a common
+        occurrence when the network path traverses an overlay (e.g. another
+        WireGuard tunnel, PPPoE, or similar).  With DF disabled the kernel
+        fragments instead of drops, allowing the far end to reassemble.
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _SOCKET_BUFFER_SIZE)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _SOCKET_BUFFER_SIZE)
+        # IP_MTU_DISCOVER / IP_PMTUDISC_DONT is Linux-specific.
+        if hasattr(socket, "IP_MTU_DISCOVER") and hasattr(socket, "IP_PMTUDISC_DONT"):
+            sock.setsockopt(
+                socket.IPPROTO_IP,
+                socket.IP_MTU_DISCOVER,
+                socket.IP_PMTUDISC_DONT,
+            )
+        sock.bind((host, port))
+        return sock
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -185,16 +227,18 @@ class UDPProxy:
         """Bind both listening sockets and start the background cleanup task."""
         loop = asyncio.get_running_loop()
 
+        server_sock = self._make_socket(self.host, self.server_port)
         server_transport, _ = await loop.create_datagram_endpoint(
             lambda: _ServerSideProtocol(self),
-            local_addr=(self.host, self.server_port),
+            sock=server_sock,
         )
         self._server_transport = server_transport
         logger.info("Server listener on %s:%d", self.host, self.server_port)
 
+        client_sock = self._make_socket(self.host, self.client_port)
         await loop.create_datagram_endpoint(
             lambda: _ClientSideProtocol(self),
-            local_addr=(self.host, self.client_port),
+            sock=client_sock,
         )
         # _client_transport is populated via _ClientSideProtocol.connection_made
         logger.info("Client listener on %s:%d", self.host, self.client_port)
