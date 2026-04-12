@@ -9,19 +9,25 @@ Two UDP sockets are opened on the cloud host:
                  machine is behind CGNAT it cannot accept inbound connections,
                  so it reaches out to the proxy first.  The source address of
                  that initial (and any subsequent keepalive) packet is recorded
-                 as the server address.
+                 as the server address.  Data packets received on this port
+                 are forwarded to all currently active clients.
 
   client_port  – WireGuard clients connect here, believing it to be the
                  WireGuard server endpoint.
 
-For every distinct client (ip, port) a dedicated *relay socket* is opened on
-an ephemeral local port.  The relay socket forwards client packets to the home
-server and receives the home server's responses, routing them back to the
-correct client.
+Client packets are forwarded to the home server via the *same* server_port
+socket.  This is critical: the server is registered via an outbound UDP packet
+through its NAT/CGNAT, which creates a mapping only for the source address and
+port the server originally sent to (server_port).  Forwarding from any other
+source port (e.g. an ephemeral relay socket) would be blocked by that NAT
+mapping.
 
-Using per-client relay sockets means the home WireGuard instance sees each
-client as arriving from a different source port, which lets WireGuard's own
-peer-tracking work correctly.
+Server responses arrive back on server_port and are broadcast to all active
+client sessions.  WireGuard on each client silently drops packets it cannot
+decrypt, so only the intended recipient processes each datagram.
+
+Session tracking records each client's (ip, port) and last-seen time for
+periodic cleanup of stale entries.
 """
 
 from __future__ import annotations
@@ -44,10 +50,9 @@ _CLEANUP_INTERVAL = 60  # seconds between session-expiry sweeps
 
 @dataclass
 class ClientSession:
-    """Tracks one active WireGuard client and its relay transport."""
+    """Tracks one active WireGuard client."""
 
     addr: tuple[str, int]
-    transport: asyncio.DatagramTransport
     last_seen: float = field(default_factory=time.monotonic)
 
     def touch(self) -> None:
@@ -95,25 +100,6 @@ class _ClientSideProtocol(asyncio.DatagramProtocol):
         logger.error("Client-side socket error: %s", exc)
 
 
-class _RelayProtocol(asyncio.DatagramProtocol):
-    """Per-client relay socket – tunnels traffic between a client and the server."""
-
-    def __init__(self, proxy: UDPProxy, client_addr: tuple[str, int]) -> None:
-        self._proxy = proxy
-        self._client_addr = client_addr
-        self.transport: Optional[asyncio.DatagramTransport] = None
-
-    def connection_made(self, transport: asyncio.DatagramTransport) -> None:  # type: ignore[override]
-        self.transport = transport
-
-    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
-        # Response from home server → forward to the WireGuard client.
-        self._proxy._forward_to_client(self._client_addr, data)
-
-    def error_received(self, exc: Exception) -> None:
-        logger.error("Relay socket error for %s: %s", self._client_addr, exc)
-
-
 # ---------------------------------------------------------------------------
 # Proxy
 # ---------------------------------------------------------------------------
@@ -136,9 +122,6 @@ class UDPProxy:
 
         self._server_addr: Optional[tuple[str, int]] = None
         self._sessions: dict[tuple[str, int], ClientSession] = {}
-        # Addresses of clients whose session is currently being opened so we
-        # do not race into _open_session() twice for the same client.
-        self._pending_sessions: set[tuple[str, int]] = set()
 
         self._client_transport: Optional[asyncio.DatagramTransport] = None
         self._server_transport: Optional[asyncio.DatagramTransport] = None
@@ -149,15 +132,15 @@ class UDPProxy:
     # ------------------------------------------------------------------
 
     def _on_server_packet(self, data: bytes, addr: tuple[str, int]) -> None:
-        """Record (or update) the home server's public address."""
+        """Record (or update) the home server's address and forward data to all active clients."""
         if self._server_addr != addr:
             logger.info("Home server registered/updated: %s", addr)
         self._server_addr = addr
 
-    def _forward_to_client(self, client_addr: tuple[str, int], data: bytes) -> None:
-        """Send a packet received from the home server back to a WireGuard client."""
-        if self._client_transport is not None:
-            self._client_transport.sendto(data, client_addr)
+        if self._client_transport is not None and self._sessions:
+            for client_addr in list(self._sessions.keys()):
+                logger.debug("Forwarding server packet to client %s", client_addr)
+                self._client_transport.sendto(data, client_addr)
 
     async def _on_client_packet(self, data: bytes, addr: tuple[str, int]) -> None:
         """Handle a packet arriving from a WireGuard client."""
@@ -166,37 +149,23 @@ class UDPProxy:
             return
 
         if addr not in self._sessions:
-            if addr in self._pending_sessions:
-                # Session is being set up; drop this packet (UDP delivery is
-                # best-effort, WireGuard will retransmit).
-                return
-            self._pending_sessions.add(addr)
-            try:
-                await self._open_session(addr)
-            finally:
-                self._pending_sessions.discard(addr)
+            self._sessions[addr] = ClientSession(addr=addr)
+            logger.info("New client session: %s", addr)
 
-        if addr in self._sessions:
-            session = self._sessions[addr]
-            session.touch()
-            session.transport.sendto(data, self._server_addr)
+        self._sessions[addr].touch()
+
+        # Forward via the server_port socket so the source port matches the
+        # NAT mapping that the server registered with.
+        if self._server_transport is not None:
+            logger.debug("Forwarding client packet from %s to server %s", addr, self._server_addr)
+            self._server_transport.sendto(data, self._server_addr)
 
     # ------------------------------------------------------------------
     # Session management
     # ------------------------------------------------------------------
 
-    async def _open_session(self, client_addr: tuple[str, int]) -> None:
-        loop = asyncio.get_running_loop()
-        relay = _RelayProtocol(self, client_addr)
-        transport, _ = await loop.create_datagram_endpoint(
-            lambda: relay,
-            local_addr=(self.host, 0),
-        )
-        self._sessions[client_addr] = ClientSession(addr=client_addr, transport=transport)
-        logger.info("Opened relay session for client %s", client_addr)
-
     async def _cleanup_loop(self) -> None:
-        """Periodically close relay sockets for inactive clients."""
+        """Periodically remove inactive client sessions."""
         while True:
             expired = [
                 addr
@@ -204,8 +173,7 @@ class UDPProxy:
                 if session.is_expired(self.session_timeout)
             ]
             for addr in expired:
-                session = self._sessions.pop(addr)
-                session.transport.close()
+                self._sessions.pop(addr)
                 logger.info("Session expired for %s", addr)
             await asyncio.sleep(_CLEANUP_INTERVAL)
 
@@ -240,7 +208,7 @@ class UDPProxy:
         )
 
     async def stop(self) -> None:
-        """Cancel the cleanup task, close all relay sockets, and close listeners."""
+        """Cancel the cleanup task and close both listening sockets."""
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             try:
@@ -248,8 +216,6 @@ class UDPProxy:
             except asyncio.CancelledError:
                 pass
 
-        for session in self._sessions.values():
-            session.transport.close()
         self._sessions.clear()
 
         if self._client_transport is not None:
