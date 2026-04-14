@@ -4,7 +4,7 @@ Flow
 ----
 1. A new peer (server or client) sends its first packet.
 2. GateKeeper fires a Pushover notification containing a signed, time-limited
-   allow URL (e.g. http://my-proxy.example.com:8080/allow?token=…).
+   allow URL (e.g. http://my-proxy.example.com:9999/allow?token=…).
 3. All packets from that peer are silently dropped until the user taps
    "Allow" in the notification, which GETs the allow endpoint.
 4. After approval the peer's *IP address* is permanently whitelisted
@@ -43,7 +43,7 @@ class GateKeeper:
         pushover_token: str,
         pushover_user: str,
         public_url: str,
-        http_port: int = 8080,
+        http_port: int = 9999,
         token_ttl: int = 600,
     ) -> None:
         self._pushover_token = pushover_token

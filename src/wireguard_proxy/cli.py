@@ -66,7 +66,7 @@ from wireguard_proxy.proxy import UDPProxy
 )
 @click.option(
     "--gate-http-port",
-    default=8080,
+    default=9999,
     show_default=True,
     envvar="GATE_HTTP_PORT",
     help="Port for the allow-URL HTTP endpoint.",
@@ -119,7 +119,7 @@ def main(
             --pushover-user  <USER_KEY>  \\
             --gate-public-url http://my-proxy.example.com
 
-    The allow-link endpoint listens on --gate-http-port (default 8080).
+    The allow-link endpoint listens on --gate-http-port (default 9999).
     Make sure that port is reachable from your phone.
     Credentials can also be supplied via environment variables:
     PUSHOVER_TOKEN, PUSHOVER_USER, GATE_PUBLIC_URL.

@@ -24,7 +24,7 @@ class ProxyConfig:
     pushover_user:    Pushover user/group key.
     gate_public_url:  Publicly reachable base URL of this proxy, e.g.
                       "http://my-proxy.example.com".  Used to build allow-links.
-    gate_http_port:   Port for the allow-URL HTTP endpoint (default 8080).
+    gate_http_port:   Port for the allow-URL HTTP endpoint (default 9999).
     gate_token_ttl:   Seconds before an unclicked allow token expires (default 600).
     """
 
