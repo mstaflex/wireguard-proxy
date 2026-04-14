@@ -37,7 +37,10 @@ import logging
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from wireguard_proxy.gate import GateKeeper
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +122,13 @@ class UDPProxy:
         client_port: int,
         host: str = "0.0.0.0",
         session_timeout: int = 300,
+        gate: Optional[GateKeeper] = None,
     ) -> None:
         self.server_port = server_port
         self.client_port = client_port
         self.host = host
         self.session_timeout = session_timeout
+        self._gate = gate
 
         self._server_addr: Optional[tuple[str, int]] = None
         self._sessions: dict[tuple[str, int], ClientSession] = {}
@@ -138,6 +143,21 @@ class UDPProxy:
 
     def _on_server_packet(self, data: bytes, addr: tuple[str, int]) -> None:
         """Record (or update) the home server's address and forward data to all active clients."""
+        ip = addr[0]
+
+        if self._gate is not None and not self._gate.is_approved(ip):
+            if not self._gate.has_pending_token(ip):
+                label = f"Server {ip}"
+                if self._server_addr and self._server_addr[0] != ip:
+                    label = f"Server {ip} (was {self._server_addr[0]})"
+                asyncio.get_running_loop().create_task(
+                    self._gate.request_approval(ip, label)
+                )
+            # Still record the address so keepalives maintain the NAT hole,
+            # but don't forward data to clients yet.
+            self._server_addr = addr
+            return
+
         if self._server_addr != addr:
             logger.info("Home server registered/updated: %s", addr)
         self._server_addr = addr
@@ -153,11 +173,20 @@ class UDPProxy:
             logger.warning("Dropping packet from %s – no server registered yet", addr)
             return
 
+        ip = addr[0]
+
+        if self._gate is not None and not self._gate.is_approved(ip):
+            if not self._gate.has_pending_token(ip):
+                asyncio.get_running_loop().create_task(
+                    self._gate.request_approval(ip, f"Client {ip}")
+                )
+            return  # Drop until approved
+
         if addr not in self._sessions:
             # WireGuard roams: same IP may reappear on a new source port after a
             # NAT rebinding.  Drop the old stale entry so the broadcast set stays
             # lean and the client only receives traffic on its current port.
-            stale = [a for a in self._sessions if a[0] == addr[0] and a != addr]
+            stale = [a for a in self._sessions if a[0] == ip and a != addr]
             for old_addr in stale:
                 logger.info("Client %s roamed to %s – removing stale session", old_addr, addr)
                 self._sessions.pop(old_addr)
@@ -243,22 +272,29 @@ class UDPProxy:
         # _client_transport is populated via _ClientSideProtocol.connection_made
         logger.info("Client listener on %s:%d", self.host, self.client_port)
 
+        if self._gate is not None:
+            await self._gate.start()
+
         self._cleanup_task = loop.create_task(self._cleanup_loop())
         logger.info(
-            "Proxy started (server_port=%d, client_port=%d, timeout=%ds)",
+            "Proxy started (server_port=%d, client_port=%d, timeout=%ds%s)",
             self.server_port,
             self.client_port,
             self.session_timeout,
+            ", gate enabled" if self._gate is not None else "",
         )
 
     async def stop(self) -> None:
-        """Cancel the cleanup task and close both listening sockets."""
+        """Cancel the cleanup task, stop the gate, and close both listening sockets."""
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+
+        if self._gate is not None:
+            await self._gate.stop()
 
         self._sessions.clear()
 

@@ -11,6 +11,16 @@ services:
       - "${SERVER_PORT:-51820}:51820/udp"
       # WireGuard clients connect here
       - "${CLIENT_PORT:-51821}:51821/udp"
+      # Gate allow-URL endpoint (only needed when gating is enabled)
+      - "${GATE_HTTP_PORT:-8080}:8080/tcp"
+    environment:
+      # Pushover credentials and gate config — set these in a .env file
+      # (never commit .env to version control)
+      PUSHOVER_TOKEN: "${PUSHOVER_TOKEN:-}"
+      PUSHOVER_USER: "${PUSHOVER_USER:-}"
+      GATE_PUBLIC_URL: "${GATE_PUBLIC_URL:-}"
+      GATE_HTTP_PORT: "${GATE_HTTP_PORT:-8080}"
+      GATE_TOKEN_TTL: "${GATE_TOKEN_TTL:-600}"
     command:
       - "--server-port"
       - "51820"
