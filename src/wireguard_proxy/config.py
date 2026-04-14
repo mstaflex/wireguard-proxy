@@ -38,7 +38,7 @@ class ProxyConfig:
     pushover_token: Optional[str] = None
     pushover_user: Optional[str] = None
     gate_public_url: str = ""
-    gate_http_port: int = 8080
+    gate_http_port: int = 9999
     gate_token_ttl: int = 600
 
     def __post_init__(self) -> None:
